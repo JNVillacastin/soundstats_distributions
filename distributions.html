@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Understanding Standard Deviation with Sound</title>
+<style>
+  body{background:#071028;color:#e6eef8;font-family:Arial, sans-serif;padding:20px;}
+  .scale{display:flex;gap:10px;justify-content:center;margin:12px 0;}
+  .note{padding:8px 12px;border-radius:6px;background:#0b1220;}
+  .note.playing{background:#38bdf8;color:#012033;}
+  .controls{margin-bottom:16px;}
+  canvas{background:#0b1220;border-radius:8px;margin-top:12px;width:100%;max-width:600px;height:260px;}
+  .btn{padding:6px 12px;border:none;border-radius:6px;cursor:pointer;font-weight:bold;}
+  .btn.play{background:#38bdf8;color:#012033;}
+  .btn.stop{background:#aaa;color:#111;}
+</style>
+</head>
+<body>
+<h2>Understanding Standard Deviation with Sound</h2>
+<p>The more a note appears in the distribution, the longer it plays.<br>
+Increase SD → spread out the histogram → varied note durations.</p>
+
+<div class="controls">
+  Central note index (think of this as the mean of a distribution) (0–6): 
+  <input type="number" id="centerNote" min="0" max="6" value="3"/>
+  <br><br>
+  SD: <input type="range" id="sdRange" min="0" max="2.5" step="0.05" value="0"/>
+  <input type="number" id="sdNumber" min="0" max="10" step="0.05" value="0"/>
+  <br><br>
+  Samples: <input type="number" id="samples" min="4" max="200" value="40"/>
+  <br><br>
+  <button class="btn play" id="playBtn">Play</button>
+  <button class="btn stop" id="stopBtn">Stop</button>
+</div>
+
+<div class="scale" id="scaleDisplay"></div>
+
+<canvas id="histCanvas" width="600" height="260"></canvas>
+
+<script>
+(() => {
+  // --- Scale ---
+  const scale=['C','D','E','F','G','A','B'];
+  const semitones=[0,2,4,5,7,9,11];
+  const baseMidi=60; // C4
+  function freqForIndex(i){ 
+    const midi=baseMidi+semitones[i];
+    return 440*Math.pow(2,(midi-69)/12);
+  }
+
+  // --- DOM ---
+  const scaleDisplay=document.getElementById('scaleDisplay');
+  const centerNote=document.getElementById('centerNote');
+  const sdRange=document.getElementById('sdRange');
+  const sdNumber=document.getElementById('sdNumber');
+  const samplesEl=document.getElementById('samples');
+  const playBtn=document.getElementById('playBtn');
+  const stopBtn=document.getElementById('stopBtn');
+  const histCanvas=document.getElementById('histCanvas');
+  const ctxHist=histCanvas.getContext('2d');
+
+  // scale UI
+  scale.forEach((n,i)=>{
+    const div=document.createElement('div');
+    div.className='note'; div.textContent=`${n} (${i})`; div.dataset.index=i;
+    scaleDisplay.appendChild(div);
+  });
+
+  // --- Audio ---
+  const AudioContext=window.AudioContext||window.webkitAudioContext;
+  let audioCtx=null,scheduled=[];
+  function ensureAudio(){if(!audioCtx)audioCtx=new AudioContext();return audioCtx;}
+
+  function playNoteAtTime(ctx,freq,start,dur=0.25){
+    const osc=ctx.createOscillator(); osc.type='sine'; osc.frequency.value=freq;
+    const g=ctx.createGain();
+    g.gain.setValueAtTime(0.001,start);
+    g.gain.linearRampToValueAtTime(0.2,start+0.02);
+    g.gain.exponentialRampToValueAtTime(0.001,start+dur);
+    osc.connect(g); g.connect(ctx.destination);
+    osc.start(start); osc.stop(start+dur+0.05);
+    return {osc,g};
+  }
+
+  function gaussianRandom(){let u=0,v=0;while(u===0)u=Math.random();while(v===0)v=Math.random();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);}
+
+  function sampleIndices(center,sdValue,draws){
+    const arr=[];
+    for(let i=0;i<draws;i++){
+      let idx=center;
+      if(sdValue>0){ idx=Math.round(gaussianRandom()*sdValue+center); }
+      idx=Math.max(0,Math.min(scale.length-1,idx));
+      arr.push(idx);
+    }
+    return arr;
+  }
+
+  function drawHistogram(counts){
+    const w=histCanvas.width,h=histCanvas.height;
+    ctxHist.clearRect(0,0,w,h);
+    const max=Math.max(...counts,1);
+    const barW=w/counts.length;
+    counts.forEach((c,i)=>{
+      const barH=(c/max)*(h-20);
+      ctxHist.fillStyle='#38bdf8';
+      ctxHist.fillRect(i*barW,h-barH,barW-4,barH);
+      ctxHist.fillStyle='#fff';
+      ctxHist.fillText(scale[i],i*barW+barW/3,h-4);
+    });
+  }
+
+  function highlightNotes(indices){
+    document.querySelectorAll('.note').forEach(el=>el.classList.remove('playing'));
+    indices.forEach(i=>{
+      const el=document.querySelector(`.note[data-index="${i}"]`);
+      if(el)el.classList.add('playing');
+    });
+  }
+
+  playBtn.addEventListener('click',async()=>{
+    const center=parseInt(centerNote.value);
+    let sd=parseFloat(sdRange.value); if(sd<0.005)sd=0;
+    const draws=parseInt(samplesEl.value);
+    const samples=sampleIndices(center,sd,draws);
+    const counts=new Array(scale.length).fill(0);
+    samples.forEach(i=>counts[i]++);
+    drawHistogram(counts);
+
+    const nonzero=counts.map((c,i)=>({c,i})).filter(o=>o.c>0);
+    highlightNotes(nonzero.map(o=>o.i));
+
+    const ctx=ensureAudio(); if(ctx.state==='suspended')await ctx.resume();
+
+    const maxCount=Math.max(...counts,1);
+    let start=ctx.currentTime+0.1;
+    nonzero.forEach((o,k)=>{
+      const f=freqForIndex(o.i);
+      const dur=0.2+ (o.c/maxCount)*0.8; // scale duration 0.2s – 1.0s
+      scheduled.push(playNoteAtTime(ctx,f,start+k*0.4,dur));
+    });
+  });
+
+  stopBtn.addEventListener('click',()=>{
+    scheduled.forEach(n=>{
+      try{n.g.gain.cancelScheduledValues(audioCtx.currentTime);}catch(e){}
+    });
+    scheduled=[]; highlightNotes([]);
+  });
+
+  // sync sd inputs
+  sdRange.addEventListener('input',()=>{sdNumber.value=sdRange.value;});
+  sdNumber.addEventListener('input',()=>{sdRange.value=sdNumber.value;});
+})();
+</script>
+</body>
+</html>
